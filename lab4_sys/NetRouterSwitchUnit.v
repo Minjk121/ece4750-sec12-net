@@ -52,7 +52,7 @@ module lab4_sys_NetRouterSwitchUnit
     istream2_rdy   = 0;
     ostream_val    = 0;
 
-    if ( istream0_val ) begin
+    if ( istream0_val ) begin // highest priority
       selected_input = 0;
       istream0_rdy   = ostream_rdy;
       ostream_val    = 1;
@@ -64,7 +64,7 @@ module lab4_sys_NetRouterSwitchUnit
       ostream_val    = 1;
       ostream_msg    = istream1_msg;
     end
-    else if ( istream2_val ) begin
+    else if ( istream2_val ) begin // lowest priority
       selected_input = 2;
       istream2_rdy   = ostream_rdy;
       ostream_val    = 1;
