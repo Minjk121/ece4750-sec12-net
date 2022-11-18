@@ -35,7 +35,7 @@ memory network that interconnects each data cache's memory interface to
 main memory, and a memory network that interconnects each instruction
 cache's memory interface to main memory.
 
-PMN figure
+![](assets/fig/mcore.png)
 
 The cache network actually includes _two_ networks: one that enables
 processors to send cache requests to the caches and one that enables
@@ -43,19 +43,19 @@ caches to send cache reponses back to the processors. We alos need
 adapters at the network interfaces to convert to/from memory messages and
 network messages.
 
-cache net fig
+![](assets/fig/cachenet.png)
 
 The memory networks also include _two_ networks. The primary differences
 it at there is only a single destination.
 
-mem net fig
+![](assets/fig/memnet.png)
 
 More generally, a network enable sending messages from a set of input
 terminals and a set of output terminals. Bus and crossbar networks use
 long global wires that every input terminal can write and every output
 terminal can read.
 
-bus, xbar, butterfly, torus
+![](assets/fig/topologies.png)
 
 Bus topologies are simple but offer low throughput. Crossbar topologies
 enable higher throughput, but are also more expensive in terms of area
@@ -65,7 +65,7 @@ Examples include butterfly any torus topologies. In lab 4, you will be
 implementing a simple 1D torus topology (i.e., a four node ring) which
 only uses nearest neightbor communication.
 
-ring from fig9 of lab4
+![](assets/fig/ring.png)
 
 In addition to the network topology, a network microarchitecture will
 also need to implement a network routing algorithm (what path should we
@@ -91,7 +91,7 @@ determine which output port a given input message should be sent, while
 the switch units arbitrate when multiple input ports want to send a
 message to the same output port.
 
-route uarch
+![](assets/fig/router-uarch.png)
 
 All of our networks will work with network packets that use the following
 format.
