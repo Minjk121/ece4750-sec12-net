@@ -1,231 +1,333 @@
 
-ECE 4750 Section 8: Lab 3 Head Start
+ECE 4750 Section 12: Networks
 ==========================================================================
 
  - Author: Christopher Batten
- - Date: October 21, 2022
+ - Date: November 18, 2022
 
 **Table of Contents**
 
- - Cache Walk-Through
- - Using the Cache Functional-Level Model
- - Implementing and Testing Write Init Transaction
- - More Testing
+ - Network Overview
+ - Implementing and Testing the Route Unit
+ - Implementing and Testing the Switch Unit
+ - Implementing and Testing the Router
 
-This discussion section serves to introduce students to the basic cache
-modeling approach and testing strategy we will be using to implement a
-blocking FSM cache in lab 3. You should log into the `ecelinux` servers
-using the remote access option of your choice and then source the setup
-script.
+This discussion section serves as a basic introduction to networks which
+will help students implement a simple ring network for lab 4. You should
+log into the `ecelinux` servers using the remote access option of your
+choice and then source the setup script.
 
     % source setup-ece4750.sh
     % mkdir -p $HOME/ece4750
     % cd $HOME/ece4750
-    % git clone git@github.com:cornell-ece4750/ece4750-sec08-proc sec08
-    % cd sec08
+    % git clone git@github.com:cornell-ece4750/ece4750-sec12-net sec12
+    % cd sec12
     % TOPDIR=$PWD
     % mkdir $TOPDIR/build
 
-Cache Walk-Through
+Network Overview
 --------------------------------------------------------------------------
 
-The following figure shows the high-level interface for our cache. The
-cache has two memory interfaces. One enables the processor to send memory
-requests and receive responses from the cache, and the other enables the
-cache to send memory requests and receive responses from main memory. All
-interfaces are implemented using the latency-insensitive val/rdy
-micro-protocol.
+In order to implement the multicore processor shown below, we will need
+to implement three networks: a cache network that interconnects each
+processor's data memory interface to each of the four data cache banks, a
+memory network that interconnects each data cache's memory interface to
+main memory, and a memory network that interconnects each instruction
+cache's memory interface to main memory.
 
-![](assets/fig/lab3-mem-ifc.png)
+PMN figure
 
-We provide students a trivial functional-level model of a cache which
-essentially just directly forwards requests from the processor to main
-memory and then directly forwards reponses from main memory back to the
-processor. You can find the FL model in `lab3_mem/CacheFL.py`. This is
-what the interface looks like in Verilog for an RTL implementation of the
-cache.
+The cache network actually includes _two_ networks: one that enables
+processors to send cache requests to the caches and one that enables
+caches to send cache reponses back to the processors. We alos need
+adapters at the network interfaces to convert to/from memory messages and
+network messages.
 
-    module lab3_mem_CacheSimple
+cache net fig
+
+The memory networks also include _two_ networks. The primary differences
+it at there is only a single destination.
+
+mem net fig
+
+More generally, a network enable sending messages from a set of input
+terminals and a set of output terminals. Bus and crossbar networks use
+long global wires that every input terminal can write and every output
+terminal can read.
+
+bus, xbar, butterfly, torus
+
+Bus topologies are simple but offer low throughput. Crossbar topologies
+enable higher throughput, but are also more expensive in terms of area
+and energy. Scalable networks use a set of smaller _routers_
+interconnected by shorter _channels_ to create a network _topology_.
+Examples include butterfly any torus topologies. In lab 4, you will be
+implementing a simple 1D torus topology (i.e., a four node ring) which
+only uses nearest neightbor communication.
+
+ring from fig9 of lab4
+
+In addition to the network topology, a network microarchitecture will
+also need to implement a network routing algorithm (what path should we
+take to get from a give input terminal to a given output terminal?) and a
+network flow control scheme (how should we allocate resources like ports
+and buffers?).
+
+We can use _zero load latency_ and _ideal terminal throughput_ to analyze
+the first-order performance of a network. The zero load latency is the
+number of cycles it takes for a packet to go from the input terminals to
+the output terminals assuming a specific traffic pattern. The ideal
+terminal throughput is the maximum achievable throughput an input
+terminal can achieve assuming a specific traffic pattern, a perfect
+routing algorithm, and a perfect flow control scheme. We will discuss the
+zero load latency and ideal terminal throughput of our simple four node
+ring network topology in the discussion section.
+
+Each router in our network will have three input ports and three output
+ports. All ports will use latency insensitive stream interfaces. We will
+use the following router microarchitecture which includes three input
+queues, three route units, and three switch units. The route units
+determine which output port a given input message should be sent, while
+the switch units arbitrate when multiple input ports want to send a
+message to the same output port.
+
+route uarch
+
+All of our networks will work with network packets that use the following
+format.
+
+     43  42 41  40 39    32 31            0
+    +------+------+--------+---------------+
+    | dest | src  | opaque |    payload    |
+    +------+------+--------+---------------+
+
+This network packet is shown with a payload of 32 bits, but our networks
+will actually be parameterized by the payload size so we can use a single
+network implementation in the cache request network, cache response
+network, memory request network, and memory response network.
+
+Implementing and Testing the Route Unit
+--------------------------------------------------------------------------
+
+We will start by implementing a very basic route unit. Take a look at the
+route unit in `lab4_sys/NetRouterRouteUnit.v`. The interface looks like
+this:
+
+    module lab4_sys_NetRouterRouteUnit
     #(
-      parameter p_num_banks = 1 // Total number of cache banks
+      parameter p_msg_nbits = 44
     )
     (
-      input  logic          clk,
-      input  logic          reset,
+      input  logic                   clk,
+      input  logic                   reset,
 
-      // Processor <-> Cache Interface
+      // Router id (which router is this in the network?)
 
-      input  mem_req_4B_t   proc2cache_reqstream_msg,
-      input  logic          proc2cache_reqstream_val,
-      output logic          proc2cache_reqstream_rdy,
+      input  logic     [1:0]         router_id,
 
-      output mem_resp_4B_t  proc2cache_respstream_msg,
-      output logic          proc2cache_respstream_val,
-      input  logic          proc2cache_respstream_rdy,
+      // Input stream
 
-      // Cache <-> Memory Interface
+      input  logic [p_msg_nbits-1:0] istream_msg,
+      input  logic                   istream_val,
+      output logic                   istream_rdy,
 
-      output mem_req_16B_t  cache2mem_reqstream_msg,
-      output logic          cache2mem_reqstream_val,
-      input  logic          cache2mem_reqstream_rdy,
+      // Output stream 0
 
-      input  mem_resp_16B_t cache2mem_respstream_msg,
-      input  logic          cache2mem_respstream_val,
-      output logic          cache2mem_respstream_rdy
+      output logic [p_msg_nbits-1:0] ostream0_msg,
+      output logic                   ostream0_val,
+      input  logic                   ostream0_rdy,
+
+      // Output stream 0
+
+      output logic [p_msg_nbits-1:0] ostream1_msg,
+      output logic                   ostream1_val,
+      input  logic                   ostream1_rdy,
+
+      // Output stream 0
+
+      output logic [p_msg_nbits-1:0] ostream2_msg,
+      output logic                   ostream2_val,
+      input  logic                   ostream2_rdy
     );
 
-Notice that we are using SystemVerilog structs to encode the memory
-requests and responses. Here is the memory request struct format:
+The route unit has one input stream interface and three output stream
+interfaces. The route unit we will implement in the discussion section
+will simply use the destination field of the network message as the
+output port. For the ring network you will need to implement a more
+complicated route unit that picks an output port based on your desired
+routing algorithm and the current routers id.
 
-     76  74 73           66 65              34 33  32 31               0
-    +------+---------------+------------------+------+------------------+
-    | type | opaque        | addr             | len  | data             |
-    +------+---------------+------------------+------+------------------+
-
-And here is the memory response struct format:
-
-     46  44 43           36 35  34 33  32 31               0
-    +------+---------------+------+------+------------------+
-    | type | opaque        | test | len  | data             |
-    +------+---------------+------+------+------------------+
-
-The baseline implementation for this lab will be a 256B direct-mapped
-cache with 16B cache lines and a write-back, write-allocate write policy.
-In this discussion section, we provide you a simple cache that partially
-implements the write init transaction. The block diagram for how the
-datapath unit is shown below.
-
-![](assets/fig/lab3-mem-simple-dpath.png)
-
-Here is the FSM for the write init transaction.
-
-![](assets/fig/lab3-mem-simple-ctrl.png)
-
-Take a look at the code in the following files to learn more about how
-the simple cache is implemented.
-
- - `lab3_mem/CacheSimpleDpath.v`
- - `lab3_mem/CacheSimpleCtrl.v`
- - `lab3_mem/CacheSimple.v`
-
-Using the Cache Functional-Level Model
---------------------------------------------------------------------------
-
-Let's take a look at a basic test for the write init transaction. They
-primary way we will test our processors is by writing very small
-sequences of memory requests and the expected memory responses. Take a
-look at the test in `lab3_mem/test/simple_test.py` to see how to write
-such tests.
-
-    def test( cmdline_opts ):
-
-      msgs = [
-        #    type  opq  addr    len data                type  opq  test len data
-        req( 'in', 0x0, 0x1000, 0, 0xdeadbeef ), resp( 'in',  0x0, 0,   0,  0          ),
-      ]
-
-      model = TestHarness( CacheFL(), msgs[::2], msgs[1::2] )
-
-      run_sim( model, cmdline_opts, duts=['cache'] )
-
-We use helper python functions to create the desired memory requests and
-expected memory responses. This test has a single write init transaction.
-As awlays, you should always make sure your tests pass on the FL model
-before using them to test your RTL model. Let's run the above test on our
-FL model.
+Go ahead and complete the implementation of the route unit. You want to
+first check to make sure the input stream is valid, check the destination
+field, and use the destination field to set the appropriate output stream
+valid signal and input stream ready signal. Once you have finished you
+can test your route unit like this:
 
     % cd $TOPDIR/build
-    % pytest ../lab3_mem/test/simple_test.py -s
+    % pytest ../lab4_sys/test/NetRouterRouteUnit_test.py
 
-Use the `-s` command line option so you can see the linetrace. Verify
-that you can see the stream source sending memory requests to cache which
-then forwards those requests to main memory. Also verify that you can see
-the corresponding response coming back from main memory to the cache
-which then forwards this response back to the stream sink.
+Use the `-k` and `-s` command line options to view the line traces for
+specific test cases.
 
-Implementing and Testing the Write Init Transaction
+Implementing and Testing the Switch Unit
 --------------------------------------------------------------------------
 
-Let's try the same test on the RTL implementation of the simple cache.
-Modify `run_test` to use the `CacheSimple` like this:
+Next we need to implement a very basic switch unit. Take a look at the
+switch unit in `lab4_sys/NetRouterSwitchUnit.v`. The interface looks like
+this:
 
-    run_sim( CacheSimple, cmdline_opts, duts=['cache'] )
+    module lab4_sys_NetRouterSwitchUnit
+    #(
+      parameter p_msg_nbits = 44
+    )
+    (
+      input  logic                   clk,
+      input  logic                   reset,
 
-Then rerun the test. The test will not pass since we have not implemented
-the write init transaction yet.
+      // Input stream 0
 
-The first step is to figure out the address mapping. Find the address
-mapping code in the `lab3_mem/CacheSimpleDpath.v`:
+      input  logic [p_msg_nbits-1:0] istream0_msg,
+      input  logic                   istream0_val,
+      output logic                   istream0_rdy,
 
-    // Address Mapping
+      // Input stream 1
 
-    logic  [1:0] cachereq_addr_byte_offset;
-    logic  [1:0] cachereq_addr_word_offset;
-    logic  [3:0] cachereq_addr_index;
-    logic [23:0] cachereq_addr_tag;
+      input  logic [p_msg_nbits-1:0] istream1_msg,
+      input  logic                   istream1_val,
+      output logic                   istream1_rdy,
 
-    generate
-      if ( p_num_banks == 1 ) begin
-        // assign cachereq_addr_byte_offset = cachereq_addr[??:??];
-        // assign cachereq_addr_word_offset = cachereq_addr[??:??];
-        // assign cachereq_addr_index       = cachereq_addr[??:??];
-        // assign cachereq_addr_tag         = cachereq_addr[??:??];
-      end
-      else if ( p_num_banks == 4 ) begin
-        // handle address mapping for four banks
-      end
-    endgenerate
+      // Input stream 2
 
-Note that your cache needs to support a four-bank configuration, but this
-should be one of the last features you implement. Uncomment and fill in
-the `??` to extract the byte offset, word offset, index, and tag from the
-cache request address.
+      input  logic [p_msg_nbits-1:0] istream2_msg,
+      input  logic                   istream2_val,
+      output logic                   istream2_rdy,
 
-The second step is to implement the FSM. Start by implementing the state
-transition logic, and then implement the state output table. We have
-implemented the IDLE state for you. The seven control signals are shown
-in the datapath diagram. The valid bit input and valid write enable
-signals in the state output table are used to control the valid bits
-which are stored in the control unit.
+      // Output stream
 
-Once you have implemented the address map, strate transition logic, and
-the state output table, rerun our simple test.
+      output logic [p_msg_nbits-1:0] ostream_msg,
+      output logic                   ostream_val,
+      input  logic                   ostream_rdy
+    );
+
+The switch unit has three input stream interfaces and one output stream
+interface. The switch unit we will implement in the discussion section
+will simply use a fixed priority. If multiple input ports want to use a
+given output port, we give highest priority to the input port with the
+lowest index (i.e., input port 0 has the highest priority). Technically
+this will probably work in the ring network, but it could perform poorly
+since it does not attempt to provide any kind of fair arbitration across
+the input ports. Students may want to experiment with more sophisticated
+arbitration schemes such as round-robin arbitration.
+
+Go ahead and complete the implementation of the switch unit. You want to
+check each of the input streams valid signals in priority order and as
+soon as you find a valid input stream set the output stream valid bit,
+output stream message, and input stream ready signal appropriately. Once
+you have finished you can test your route unit like this:
 
     % cd $TOPDIR/build
-    % pytest ../lab3_mem/test/simple_test.py -s
+    % pytest ../lab4_sys/test/NetRouterSwitchUnit_test.py
 
-You should see a line trace like this:
+Use the `-k` and `-s` command line options to view the line traces for
+specific test cases.
 
-                                            tag array
-                                        -------------------
-        cachereq                   state 0   1   2       16                      cacheresp
-     1r                           > (I [ - | - | - |...| - ]) > [ ]...>...[  ] >
-     2r                           > (I [ - | - | - |...| - ]) > [ ]...>...[  ] >
-     3:                           > (I [ - | - | - |...| - ]) > [ ]...>...[  ] >
-     4: in:00:00001000:0:deadbeef > (I [ - | - | - |...| - ]) > [ ]...>...[  ] >
-     5: .                         > (TC[ - | - | - |...| - ]) > [ ]...>...[  ] >
-     6: .                         > (IN[ - | - | - |...| - ]) > [ ]...>...[  ] >
-     7: .                         > (W [010| - | - |...| - ]) > [ ]...>...[  ] > in:00:0:0:00000000
-     8:                           > (I [010| - | - |...| - ]) > [ ]...>...[  ] >
-     9:                           > (I [010| - | - |...| - ]) > [ ]...>...[  ] >
-    10:                           > (I [010| - | - |...| - ]) > [ ]...>...[  ] >
-    11:                           > (I [010| - | - |...| - ]) > [ ]...>...[  ] >
-    12:                           > (I [010| - | - |...| - ]) > [ ]...>...[  ] >
-
-You can see the write init request going into the cache on cycle 4, the
-cache transitioning through the I -> TC -> IN -> W states, the tag array
-being updated in the IN state, and the write init resopnse being returned
-from the cache on cycle 7.
-
-More Testing
+Implementing and Testing the Router
 --------------------------------------------------------------------------
 
-Add a second write init transaction in the given test case. Use an
-address which results in the second write init transaction writing the
-second set in the cache. Run the test and verify from the line trace that
-the tags in set 0 and set 1 are now valid.
+Now that we have implemented and tested the route unit and switch unit,
+we can compose them with the input queues to implement the three-port
+router. Take a look at the switch unit in `lab4_sys/NetRouter.v`. The
+interface looks like this:
 
-Now add a total of 16 write init transactions. Each transaction should go
-to a different set in the cache. Verify the cache is functioning as
-expected using the line trace.
+    module lab4_sys_NetRouter
+    #(
+      parameter p_msg_nbits = 44
+    )
+    (
+      input  logic                   clk,
+      input  logic                   reset,
 
+      // Router id (which router is this in the network?)
+
+      input  logic     [1:0]         router_id,
+
+      // Input stream 0
+
+      input  logic [p_msg_nbits-1:0] istream0_msg,
+      input  logic                   istream0_val,
+      output logic                   istream0_rdy,
+
+      // Input stream 1
+
+      input  logic [p_msg_nbits-1:0] istream1_msg,
+      input  logic                   istream1_val,
+      output logic                   istream1_rdy,
+
+      // Input stream 2
+
+      input  logic [p_msg_nbits-1:0] istream2_msg,
+      input  logic                   istream2_val,
+      output logic                   istream2_rdy,
+
+      // Output stream 0
+
+      output logic [p_msg_nbits-1:0] ostream0_msg,
+      output logic                   ostream0_val,
+      input  logic                   ostream0_rdy,
+
+      // Output stream 0
+
+      output logic [p_msg_nbits-1:0] ostream1_msg,
+      output logic                   ostream1_val,
+      input  logic                   ostream1_rdy,
+
+      // Output stream 0
+
+      output logic [p_msg_nbits-1:0] ostream2_msg,
+      output logic                   ostream2_val,
+      input  logic                   ostream2_rdy
+    );
+
+
+The router has three input streams and three output streams. We have
+provided the composition for the router for you. You can test the router
+like this:
+
+    % cd $TOPDIR/build
+    % pytest ../lab4_sys/test/NetRouter_test.py
+
+Use the `-k` and `-s` command line options to view the line traces for
+specific test cases. Here is what the line trace looks like.
+
+         src0   src1   src2     qqq rrr sss  out0   out1   out2     sink0  sink1  sink2
+     1r       |      |       > (   (   |   )      |.     |.     ) >       |.     |.
+     2r       |      |       > (   (   |   )      |.     |.     ) >       |.     |.
+     3:       |      |       > (   (   |   )      |.     |.     ) >       |.     |.
+     4: 0>0:00|1>0:00|2>0:00 > (   (   |   )      |      |      ) >       |      |
+     5: 0>0:01|1>0:01|2>0:01 > (...(0  |0  )0>0:00|      |      ) > 0>0:00|      |
+     6: 0>0:02|1>0:02|2>0:02 > (...(0  |0  )0>0:01|      |      ) > 0>0:01|      |
+     7: 0>0:03|1>0:03|2>0:03 > (...(0  |0  )0>0:02|      |      ) > 0>0:02|      |
+     8: 0>0:04|#     |#      > (...(0  |0  )0>0:03|      |      ) > 0>0:03|      |
+     9: 0>0:05|#     |#      > (...(0  |0  )0>0:04|      |      ) > 0>0:04|      |
+    10: 0>0:06|#     |#      > (...(0  |0  )0>0:05|      |      ) > 0>0:05|      |
+    11: 0>0:07|#     |#      > (...(0  |0  )0>0:06|      |      ) > 0>0:06|      |
+    12: 0>0:08|#     |#      > (...(0  |0  )0>0:07|      |      ) > 0>0:07|      |
+    13: 0>0:09|#     |#      > (...(0  |0  )0>0:08|      |      ) > 0>0:08|      |
+    14: 0>0:0a|#     |#      > (...(0  |0  )0>0:09|      |      ) > 0>0:09|      |
+    15: 0>0:0b|#     |#      > (...(0  |0  )0>0:0a|      |      ) > 0>0:0a|      |
+    16: 0>0:0c|#     |#      > (...(0  |0  )0>0:0b|      |      ) > 0>0:0b|      |
+    17: 0>0:0d|#     |#      > (...(0  |0  )0>0:0c|      |      ) > 0>0:0c|      |
+    18: 0>0:0e|#     |#      > (...(0  |0  )0>0:0d|      |      ) > 0>0:0d|      |
+    19: 0>0:0f|#     |#      > (...(0  |0  )0>0:0e|      |      ) > 0>0:0e|      |
+    20:       |#     |#      > (...(0  |0  )0>0:0f|      |      ) > 0>0:0f|      |
+    21:       |#     |#      > (   ( 0 |1  )1>0:00|      |      ) > 1>0:00|      |
+    22:       |1>0:04|#      > (   ( 0 |1  )1>0:01|      |      ) > 1>0:01|      |
+    23:       |1>0:05|#      > (   ( 0 |1  )1>0:02|      |      ) > 1>0:02|      |
+    24:       |1>0:06|#      > (   ( 0 |1  )1>0:03|      |      ) > 1>0:03|      |
+    25:       |1>0:07|#      > (   ( 0 |1  )1>0:04|      |      ) > 1>0:04|      |
+    26:       |1>0:08|#      > (   ( 0 |1  )1>0:05|      |      ) > 1>0:05|      |
+    27:       |1>0:09|#      > (   ( 0 |1  )1>0:06|      |      ) > 1>0:06|      |
+
+You can see that src0 gets to send all of its messages first since it is
+given highest priority, and then src1 is able to start sending its
+messages.
